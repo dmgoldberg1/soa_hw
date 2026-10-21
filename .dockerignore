@@ -1,4 +1,9 @@
-*
-!services/
-!services/orders/
-!services/orders/main.py
+.venv
+.git
+.agents
+.aws
+.codex
+__pycache__
+.pytest_cache
+app/generated
+.env

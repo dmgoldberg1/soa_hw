@@ -1,0 +1,19 @@
+from __future__ import annotations
+
+from fastapi import APIRouter
+from app import service
+from app.contract import contract_response
+{{imports}}
+
+router = APIRouter()
+
+{% for operation in operations %}
+@router.{{operation.type}}(
+    '{{operation.path}}',
+    response_model={{operation.response}},
+    {% if operation.status_code %}status_code={{operation.status_code}},{% endif %}
+)
+def {{operation.function_name}}({{operation.snake_case_arguments}}):
+    result = service.{{operation.function_name}}({{operation.plain_arguments}})
+    return contract_response(result, {{operation.response}}, {{operation.status_code or 200}})
+{% endfor %}

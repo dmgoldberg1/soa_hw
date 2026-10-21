@@ -1,0 +1,421 @@
+openapi: 3.0.3
+info:
+  title: Учебный Marketplace
+  version: 1.0.0
+  description: |
+    Contract-first API без авторизации. Для операций с заказами передаётся
+    обязательный заголовок X-User-Id (UUID). Он определяет владельца и лимиты.
+    Денежные величины имеют точность до копеек, округление ROUND_HALF_UP.
+    PUT полностью заменяет изменяемые поля. DELETE архивирует товар.
+servers:
+  - url: http://localhost:8000
+x-common-responses: &commonErrors
+  '500':
+    description: INTERNAL_ERROR — непредвиденная ошибка сервера
+    content:
+      application/json:
+        schema: {$ref: '#/components/schemas/ApiError'}
+paths:
+  /products:
+    get:
+      operationId: list_products
+      tags: [products]
+      description: Все товары, включая ARCHIVED; фильтры применяются совместно.
+      parameters:
+        - in: query
+          name: page
+          schema: {type: integer, minimum: 0, default: 0}
+        - in: query
+          name: size
+          schema: {type: integer, minimum: 1, default: 20}
+        - in: query
+          name: status
+          schema: {$ref: '#/components/schemas/ProductStatus'}
+        - in: query
+          name: category
+          schema: {type: string, minLength: 1, maxLength: 100}
+      responses:
+        <<: *commonErrors
+        '200':
+          description: Страница товаров, сортировка по created_at и id
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProductPage'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+    post:
+      operationId: create_product
+      tags: [products]
+      description: Создание товара.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProductCreate'}
+      responses:
+        <<: *commonErrors
+        '201': &productResponse
+          description: Товар
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ProductResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+  /products/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+    get:
+      operationId: get_product
+      tags: [products]
+      description: Получение любого товара по UUID.
+      responses:
+        <<: *commonErrors
+        '200': *productResponse
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '404': {$ref: '#/components/responses/ProductNotFound'}
+    put:
+      operationId: update_product
+      tags: [products]
+      description: Полная замена изменяемых полей товара.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ProductUpdate'}
+      responses:
+        <<: *commonErrors
+        '200': *productResponse
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '404': {$ref: '#/components/responses/ProductNotFound'}
+    delete:
+      operationId: delete_product
+      tags: [products]
+      description: Перевод в ARCHIVED, повторный DELETE успешен.
+      responses:
+        <<: *commonErrors
+        '204': {description: Товар архивирован}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '404': {$ref: '#/components/responses/ProductNotFound'}
+  /orders:
+    parameters:
+      - {$ref: '#/components/parameters/UserId'}
+    post:
+      operationId: create_order
+      tags: [orders]
+      description: |
+        Создание заказа для пользователя из X-User-Id. Проверки по порядку:
+        лимит CREATE_ORDER, активный заказ, каталог, остатки, промокод.
+        Резерв, снапшот цен, промокод и операция сохраняются в одной транзакции.
+        Повторяющиеся product_id запрещены как VALIDATION_ERROR.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/OrderCreate'}
+      responses:
+        <<: *commonErrors
+        '201': &orderResponse
+          description: Заказ со снапшотами цен
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OrderResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '404': {$ref: '#/components/responses/ProductNotFound'}
+        '409':
+          description: ORDER_HAS_ACTIVE, PRODUCT_INACTIVE, INSUFFICIENT_STOCK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ApiError'}
+        '422': {$ref: '#/components/responses/PromoError'}
+        '429': {$ref: '#/components/responses/OrderLimit'}
+  /orders/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+      - {$ref: '#/components/parameters/UserId'}
+    get:
+      operationId: get_order
+      tags: [orders]
+      description: Получение своего заказа. Владелец определяется по X-User-Id.
+      responses:
+        <<: *commonErrors
+        '200': *orderResponse
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/OrderNotFound'}
+    put:
+      operationId: update_order
+      tags: [orders]
+      description: |
+        Только свой заказ в состоянии CREATED; пользователь задан X-User-Id.
+        Лимит UPDATE_ORDER проверяется для текущего пользователя.
+        Возврат старого резерва, новый резерв и пересчёт атомарны.
+        Новые позиции получают текущие цены. Если сумма ниже min_order_amount,
+        промокод снимается и использование возвращается. Истёкший или отключённый
+        промокод даёт PROMO_CODE_INVALID с откатом обновления.
+        Текущее использование этого заказа учитывается при проверке max_uses.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/OrderUpdate'}
+      responses:
+        <<: *commonErrors
+        '200': *orderResponse
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404':
+          description: ORDER_NOT_FOUND, PRODUCT_NOT_FOUND
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ApiError'}
+        '409':
+          description: INVALID_STATE_TRANSITION, PRODUCT_INACTIVE, INSUFFICIENT_STOCK
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ApiError'}
+        '422': {$ref: '#/components/responses/PromoError'}
+        '429': {$ref: '#/components/responses/OrderLimit'}
+  /orders/{id}/cancel:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+      - {$ref: '#/components/parameters/UserId'}
+    post:
+      operationId: cancel_order
+      tags: [orders]
+      description: Отмена своего заказа из CREATED/PAYMENT_PENDING возвращает резерв и использование промокода.
+      responses:
+        <<: *commonErrors
+        '200': *orderResponse
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/OrderNotFound'}
+        '409': {$ref: '#/components/responses/StateError'}
+  /orders/{id}/status:
+    parameters:
+      - {$ref: '#/components/parameters/Id'}
+      - {$ref: '#/components/parameters/UserId'}
+    post:
+      operationId: change_order_status
+      tags: [orders]
+      description: |
+        Переход своего заказа по модели состояний:
+        CREATED → PAYMENT_PENDING → PAID → SHIPPED → COMPLETED.
+        Для отмены используется отдельный /cancel.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/OrderStatusChange'}
+      responses:
+        <<: *commonErrors
+        '200': *orderResponse
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/OrderNotFound'}
+        '409': {$ref: '#/components/responses/StateError'}
+  /promo-codes:
+    post:
+      operationId: create_promo_code
+      tags: [promo-codes]
+      description: Создание промокода. Даты с часовым поясом, valid_until позже valid_from.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PromoCodeCreate'}
+      responses:
+        <<: *commonErrors
+        '201':
+          description: Промокод создан
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PromoCodeResponse'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '409':
+          description: PROMO_CODE_EXISTS
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ApiError'}
+components:
+  parameters:
+    UserId:
+      name: X-User-Id
+      in: header
+      required: true
+      description: UUID пользователя для владения заказом и лимитов. Регистрация не требуется.
+      schema: {type: string, format: uuid}
+    Id:
+      name: id
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+  responses:
+    ValidationError:
+      description: VALIDATION_ERROR — details.violations содержит field и message для каждого нарушения
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    Forbidden:
+      description: ORDER_OWNERSHIP_VIOLATION — заказ принадлежит другому пользователю
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    ProductNotFound:
+      description: PRODUCT_NOT_FOUND
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    OrderNotFound:
+      description: ORDER_NOT_FOUND
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    OrderLimit:
+      description: ORDER_LIMIT_EXCEEDED — интервал N минут задаётся ORDER_INTERVAL_MINUTES
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    PromoError:
+      description: PROMO_CODE_INVALID или PROMO_CODE_MIN_AMOUNT
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    StateError:
+      description: INVALID_STATE_TRANSITION
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+  schemas:
+    ApiError:
+      type: object
+      required: [error_code, message]
+      properties:
+        error_code:
+          type: string
+          enum: [PRODUCT_NOT_FOUND, PRODUCT_INACTIVE, ORDER_NOT_FOUND, ORDER_LIMIT_EXCEEDED, ORDER_HAS_ACTIVE, INVALID_STATE_TRANSITION, INSUFFICIENT_STOCK, PROMO_CODE_INVALID, PROMO_CODE_MIN_AMOUNT, ORDER_OWNERSHIP_VIOLATION, VALIDATION_ERROR, PROMO_CODE_EXISTS, INTERNAL_ERROR, NOT_FOUND, METHOD_NOT_ALLOWED]
+        message: {type: string}
+        details:
+          type: object
+          nullable: true
+          additionalProperties: true
+    ProductStatus:
+      type: string
+      enum: [ACTIVE, INACTIVE, ARCHIVED]
+    OrderStatus:
+      type: string
+      enum: [CREATED, PAYMENT_PENDING, PAID, SHIPPED, COMPLETED, CANCELED]
+    Money:
+      type: number
+      format: decimal
+      minimum: 0
+      maximum: 9999999999.99
+      multipleOf: 0.01
+    ProductCreate:
+      type: object
+      additionalProperties: false
+      required: [name, price, stock, category, status]
+      properties: &productProperties
+        name: {type: string, minLength: 1, maxLength: 255}
+        description: {type: string, maxLength: 4000, nullable: true}
+        price: {type: number, format: decimal, minimum: 0.01, maximum: 9999999999.99, multipleOf: 0.01}
+        stock: {type: integer, minimum: 0, maximum: 2147483647}
+        category: {type: string, minLength: 1, maxLength: 100}
+        status: {$ref: '#/components/schemas/ProductStatus'}
+    ProductUpdate:
+      allOf:
+        - {$ref: '#/components/schemas/ProductCreate'}
+    ProductResponse:
+      type: object
+      required: [name, price, stock, category, status, id, created_at, updated_at]
+      properties:
+        <<: *productProperties
+        id: {type: string, format: uuid, readOnly: true}
+        created_at: {type: string, format: date-time, readOnly: true}
+        updated_at: {type: string, format: date-time, readOnly: true}
+    ProductPage:
+      type: object
+      required: [content, totalElements, page, size]
+      properties:
+        content:
+          type: array
+          items: {$ref: '#/components/schemas/ProductResponse'}
+        totalElements: {type: integer, minimum: 0}
+        page: {type: integer, minimum: 0}
+        size: {type: integer, minimum: 1}
+    OrderItemRequest:
+      type: object
+      additionalProperties: false
+      required: [product_id, quantity]
+      properties:
+        product_id: {type: string, format: uuid}
+        quantity: {type: integer, minimum: 1, maximum: 999}
+    OrderCreate:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 50
+          x-unique-product-ids: true
+          items: {$ref: '#/components/schemas/OrderItemRequest'}
+        promo_code: {type: string, pattern: '^[A-Z0-9_]{4,20}$', nullable: true}
+    OrderUpdate:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 50
+          x-unique-product-ids: true
+          items: {$ref: '#/components/schemas/OrderItemRequest'}
+    OrderItemResponse:
+      type: object
+      required: [id, product_id, quantity, price_at_order]
+      properties:
+        id: {type: string, format: uuid}
+        product_id: {type: string, format: uuid}
+        quantity: {type: integer, minimum: 1, maximum: 999}
+        price_at_order: {$ref: '#/components/schemas/Money'}
+    OrderResponse:
+      type: object
+      required: [id, user_id, status, promo_code_id, total_amount, discount_amount, created_at, updated_at, items]
+      properties:
+        id: {type: string, format: uuid}
+        user_id: {type: string, format: uuid}
+        status: {$ref: '#/components/schemas/OrderStatus'}
+        promo_code_id: {type: string, format: uuid, nullable: true}
+        total_amount: {$ref: '#/components/schemas/Money'}
+        discount_amount: {$ref: '#/components/schemas/Money'}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        items:
+          type: array
+          items: {$ref: '#/components/schemas/OrderItemResponse'}
+    OrderStatusChange:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: {$ref: '#/components/schemas/OrderStatus'}
+    PromoCodeCreate:
+      type: object
+      additionalProperties: false
+      required: [code, discount_type, discount_value, min_order_amount, max_uses, valid_from, valid_until, active]
+      properties: &promoProperties
+        code: {type: string, pattern: '^[A-Z0-9_]{4,20}$'}
+        discount_type: {type: string, enum: [PERCENTAGE, FIXED_AMOUNT]}
+        discount_value: {type: number, format: decimal, minimum: 0.01, maximum: 9999999999.99, multipleOf: 0.01}
+        min_order_amount: {$ref: '#/components/schemas/Money'}
+        max_uses: {type: integer, minimum: 1, maximum: 2147483647}
+        valid_from: {type: string, format: date-time}
+        valid_until: {type: string, format: date-time}
+        active: {type: boolean, default: true}
+    PromoCodeResponse:
+      type: object
+      required: [code, discount_type, discount_value, min_order_amount, max_uses, valid_from, valid_until, active, id, current_uses]
+      properties:
+        <<: *promoProperties
+        id: {type: string, format: uuid}
+        current_uses: {type: integer, minimum: 0}
