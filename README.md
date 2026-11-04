@@ -1,6 +1,32 @@
-# Домашние задания по СОА
+# Flight Booking — ДЗ №3
 
-- [ДЗ 1 — архитектура маркетплейса](https://github.com/dmgoldberg1/soa_hw/tree/hw1)
-- [ДЗ 2 — OpenAPI и CRUD на Python](https://github.com/dmgoldberg1/soa_hw/tree/hw2)
+Система бронирования авиабилетов: Booking Service с REST API и Flight Service с gRPC,
+у каждого своя PostgreSQL. Реализованы транзакции, авторизация, кеширование через
+Redis Sentinel, retry и circuit breaker.
 
-Каждое задание находится в своей ветке. Описание и команды запуска — в README соответствующей ветки.
+[ER-диаграммы](docs/er.md) · [Коды ошибок gRPC](docs/grpc.md)
+
+## Запуск
+
+Нужны Docker и Docker Compose.
+
+```bash
+docker compose up --build
+```
+
+Миграции применяются автоматически. При первом запуске добавляются демонстрационные рейсы.
+API и примеры запросов: <http://localhost:8000/docs>. Цены указаны в копейках.
+
+## Проверки
+
+```bash
+docker compose exec booking python -m unittest discover -s tests -v
+```
+
+Проверка отключения Flight Service и переключения Redis-мастера:
+
+```bash
+python3 tests/check_failures.py
+```
+
+Остановка: `docker compose down`.
